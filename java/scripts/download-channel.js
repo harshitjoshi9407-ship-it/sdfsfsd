@@ -29,23 +29,23 @@ const {
 } = require("../utils/input-helper");
 
 // OPTIMIZED CONFIGURATIONS FOR HIGH-SPEED WITH STABILITY
-const MAX_PARALLEL_DOWNLOADS_CONFIG = 32; // Safe concurrency that prevents flood waits
-const MAX_PARALLEL_UPLOADS_CONFIG = 32; // Conservative uploads to avoid API limits
+const MAX_PARALLEL_DOWNLOADS_CONFIG = 8; // Safe concurrency that prevents flood waits
+const MAX_PARALLEL_UPLOADS_CONFIG = 6; // Conservative uploads to avoid API limits
 const MESSAGE_LIMIT_CONFIG = 500; // Reasonable batch size for efficient processing
-const RATE_LIMIT_DELAY_CONFIG = 500; // Safe 1 second delay, will adapt dynamically
+const RATE_LIMIT_DELAY_CONFIG = 1000; // Safe 1 second delay, will adapt dynamically
 const DOWNLOAD_DELAY_CONFIG = 500; // Safe delays that can be reduced dynamically
-const UPLOAD_DELAY_CONFIG = 500; // More conservative for uploads
+const UPLOAD_DELAY_CONFIG = 1500; // More conservative for uploads
 
 // ADAPTIVE CHUNK SIZE - compliant with Telegram API limits
-const SMALL_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 1MB for files under 100MB - faster startup
-const MEDIUM_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 2MB for medium files (100-500MB) 
-const LARGE_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 4MB for larger files - max safe Telegram chunk
+const SMALL_FILE_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB for files under 100MB - faster startup
+const MEDIUM_FILE_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB for medium files (100-500MB) 
+const LARGE_FILE_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB for larger files - max safe Telegram chunk
 
 // DYNAMIC BATCH PROCESSING - flexible batch sizes based on conditions
 const ADAPTIVE_BATCH_MODE = true; // Enable dynamic batch processing  
-const DEFAULT_BATCH_SIZE = 2; // Increased from 2 for better throughput while maintaining flexibility
+const DEFAULT_BATCH_SIZE = 5; // Increased from 2 for better throughput while maintaining flexibility
 const CONNECTION_POOL_SIZE = 32; // More connection pools for stability
-const SPEED_STABILIZATION_DELAY = 32; // Ultra-minimal stabilization delay
+const SPEED_STABILIZATION_DELAY = 20; // Ultra-minimal stabilization delay
 const THROUGHPUT_OPTIMIZATION_MODE = true;
 const AGGRESSIVE_SPEED_MODE = true; // Enabled for maximum speed
 const TARGET_SPEED_MBPS = 500; // Increased target to 35 Mbps for headroom
@@ -73,12 +73,12 @@ class DownloadChannel {
     this.startFromMessageId = 0;
     this.batchCounter = 0;
     this.downloadToEndMode = false;
-
+    
     // Initialize performance monitoring and rate limiting
     this.speedMonitor = new SpeedMonitor();
     this.rateLimiter = new RateLimiter(1000); // Start with 1 second delays, will adapt
     this.connectionPool = [];
-
+    
     // Performance tracking
     this.currentDownloadSpeeds = new Map(); // Track per-file speeds
     this.recentErrors = new Map(); // Track recent error types
@@ -119,9 +119,9 @@ class DownloadChannel {
     if (!fileSizeBytes || fileSizeBytes < 0) {
       return SMALL_FILE_CHUNK_SIZE; // Default for unknown sizes
     }
-
+    
     const fileSizeMB = fileSizeBytes / (1024 * 1024);
-
+    
     if (fileSizeMB < 100) {
       // Small files: use small chunks for faster startup
       return SMALL_FILE_CHUNK_SIZE; // 10MB
@@ -142,23 +142,22 @@ class DownloadChannel {
     const maxConcurrent = Math.min(8, messages.length); // Optimal concurrent limit
     const completedResults = [];
     let messageIndex = 0;
-
+    
     logger.info(`🔥 Dynamic batch processing: ${messages.length} messages with ${maxConcurrent} concurrent slots`);
-
+    
     // Create download function that handles individual messages
     const processMessage = async (message, index) => {
       try {
         logger.info(`🚀 Dynamic download ${index + 1}/${messages.length}: Message ${message.id}`);
-
+        
         // Call the existing downloadBatch function with single message
         const result = await this.downloadBatch(client, [message], channelId);
-
+        
         if (result && result.length > 0) {
-          const currentSpeed = await this.getCurrentSpeedSync();
-          logger.info(`✅ Dynamic completed ${index + 1}/${messages.length}: Message ${message.id} (${currentSpeed})`);
+          logger.info(`✅ Dynamic completed ${index + 1}/${messages.length}: Message ${message.id} (${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps" : "OK"})`);
           return result[0]; // Return the single result
         }
-
+        
         return null;
       } catch (error) {
         logger.error(`❌ Dynamic download failed for message ${message.id}: ${error.message}`);
@@ -173,13 +172,13 @@ class DownloadChannel {
       const batchPromises = currentBatch.map((message, i) => 
         processMessage(message, messageIndex + i)
       );
-
+      
       // Process this concurrent batch and handle individual completions
       logger.info(`⚡ Processing concurrent batch: ${currentBatch.length} downloads (${messageIndex + 1}-${messageIndex + currentBatch.length}/${messages.length})`);
-
+      
       // Use Promise.allSettled to let each download complete independently
       const results = await Promise.allSettled(batchPromises);
-
+      
       // Collect successful results
       results.forEach((result, i) => {
         if (result.status === 'fulfilled' && result.value) {
@@ -188,19 +187,19 @@ class DownloadChannel {
           logger.error(`❌ Download ${messageIndex + i + 1} rejected: ${result.reason}`);
         }
       });
-
+      
       messageIndex += currentBatch.length;
-
+      
       // Progress update
-      const speedMbps = await this.getCurrentSpeedSync();
-      logger.info(`📊 Dynamic progress: ${messageIndex}/${messages.length} processed (${speedMbps})`);
-
+      const speedMbps = this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() : "0.0";
+      logger.info(`📊 Dynamic progress: ${messageIndex}/${messages.length} processed (${speedMbps} Mbps)`);
+      
       // Small delay between concurrent batches to avoid overwhelming the system
       if (messageIndex < messages.length) {
         await this.precisionDelay(Math.min(100, RATE_LIMIT_DELAY_CONFIG));
       }
     }
-
+    
     logger.info(`🎉 Dynamic processing complete! Processed ${messages.length} messages, got ${completedResults.length} successful results`);
     return completedResults;
   }
@@ -209,13 +208,7 @@ class DownloadChannel {
    * Advanced speed monitoring system for consistent 30+ Mbps
    */
   initializeSpeedMonitor() {
-    // Start actual network monitoring
-    if (this.speedMonitor && typeof this.speedMonitor.startMonitoring === 'function') {
-      this.speedMonitor.startMonitoring();
-    }
-
-    // Initialize internal tracking variables
-    this.speedTracker = {
+    this.speedMonitor = {
       startTime: Date.now(),
       totalBytes: 0,
       currentSpeed: 0,
@@ -231,61 +224,61 @@ class DownloadChannel {
 
       updateSpeed: (bytes) => {
         const now = Date.now();
-        const elapsed = (now - this.speedTracker.startTime) / 1000;
-        this.speedTracker.totalBytes += bytes;
-        this.speedTracker.currentSpeed =
-          elapsed > 0 ? (this.speedTracker.totalBytes * 8) / elapsed : 0;
+        const elapsed = (now - this.speedMonitor.startTime) / 1000;
+        this.speedMonitor.totalBytes += bytes;
+        this.speedMonitor.currentSpeed =
+          elapsed > 0 ? (this.speedMonitor.totalBytes * 8) / elapsed : 0;
 
         // Track peak performance
-        if (this.speedTracker.currentSpeed > this.speedTracker.peakSpeed) {
-          this.speedTracker.peakSpeed = this.speedTracker.currentSpeed;
+        if (this.speedMonitor.currentSpeed > this.speedMonitor.peakSpeed) {
+          this.speedMonitor.peakSpeed = this.speedMonitor.currentSpeed;
         }
 
         // Enhanced speed history tracking
-        this.speedTracker.speedHistory.push(this.speedTracker.currentSpeed);
-        if (this.speedTracker.speedHistory.length > 10) {
-          this.speedTracker.speedHistory.shift();
+        this.speedMonitor.speedHistory.push(this.speedMonitor.currentSpeed);
+        if (this.speedMonitor.speedHistory.length > 10) {
+          this.speedMonitor.speedHistory.shift();
         }
 
         // Calculate average and variance for stability
         const avgSpeed =
-          this.speedTracker.speedHistory.reduce((a, b) => a + b, 0) /
-          this.speedTracker.speedHistory.length;
-        this.speedTracker.averageSpeed = avgSpeed;
+          this.speedMonitor.speedHistory.reduce((a, b) => a + b, 0) /
+          this.speedMonitor.speedHistory.length;
+        this.speedMonitor.averageSpeed = avgSpeed;
 
-        const currentSpeedMbps = this.speedTracker.currentSpeed / 1000000;
+        const currentSpeedMbps = this.speedMonitor.currentSpeed / 1000000;
         const avgSpeedMbps = avgSpeed / 1000000;
 
         // Ultra-aggressive speed optimization
         if (currentSpeedMbps < 25) {
           // Below 25 Mbps - maximum boost
-          this.speedTracker.stabilizationFactor = Math.min(
+          this.speedMonitor.stabilizationFactor = Math.min(
             5.0,
-            this.speedTracker.stabilizationFactor * 1.25,
+            this.speedMonitor.stabilizationFactor * 1.25,
           );
-          this.speedTracker.consecutiveLowSpeed++;
+          this.speedMonitor.consecutiveLowSpeed++;
           this.speedBoostMode = true;
         } else if (currentSpeedMbps >= 30) {
           // Above 30 Mbps - maintain with slight optimization
-          this.speedTracker.stabilizationFactor = Math.max(
+          this.speedMonitor.stabilizationFactor = Math.max(
             2.0,
-            this.speedTracker.stabilizationFactor * 0.95,
+            this.speedMonitor.stabilizationFactor * 0.95,
           );
-          this.speedTracker.consecutiveLowSpeed = 0;
+          this.speedMonitor.consecutiveLowSpeed = 0;
           this.speedBoostMode = false;
         } else {
           // Between 25-30 Mbps - aggressive boost
-          this.speedTracker.stabilizationFactor = Math.min(
+          this.speedMonitor.stabilizationFactor = Math.min(
             4.0,
-            this.speedTracker.stabilizationFactor * 1.15,
+            this.speedMonitor.stabilizationFactor * 1.15,
           );
         }
 
         // Emergency ultra-boost for consistently low speeds
-        if (this.speedTracker.consecutiveLowSpeed > 3) {
-          this.speedTracker.stabilizationFactor = 5.0;
+        if (this.speedMonitor.consecutiveLowSpeed > 3) {
+          this.speedMonitor.stabilizationFactor = 5.0;
           this.speedBoostMode = true;
-          this.speedTracker.consecutiveLowSpeed = 0;
+          this.speedMonitor.consecutiveLowSpeed = 0;
         }
       },
 
@@ -294,57 +287,34 @@ class DownloadChannel {
         const baseDelay = this.speedBoostMode ? 5 : SPEED_STABILIZATION_DELAY;
         const optimizedDelay = Math.max(
           5,
-          baseDelay / this.speedTracker.stabilizationFactor,
+          baseDelay / this.speedMonitor.stabilizationFactor,
         );
         return optimizedDelay;
       },
 
       getCurrentSpeedMbps: () => {
-        return (this.speedTracker.currentSpeed / 1000000).toFixed(1);
+        return (this.speedMonitor.currentSpeed / 1000000).toFixed(1);
       },
 
       getAverageSpeedMbps: () => {
-        return (this.speedTracker.averageSpeed / 1000000).toFixed(1);
+        return (this.speedMonitor.averageSpeed / 1000000).toFixed(1);
       },
 
       getPeakSpeedMbps: () => {
-        return (this.speedTracker.peakSpeed / 1000000).toFixed(1);
+        return (this.speedMonitor.peakSpeed / 1000000).toFixed(1);
       },
 
       getSpeedStatus: () => {
-        const speedMbps = parseFloat(this.speedTracker.getCurrentSpeedMbps());
+        const speedMbps = parseFloat(this.speedMonitor.getCurrentSpeedMbps());
         if (speedMbps >= 30) return "🟢 OPTIMAL";
         if (speedMbps >= 20) return "🟡 BOOSTING";
         return "🔴 MAXIMUM BOOST";
       },
 
       setCurrentFileSize: (size) => {
-        this.speedTracker.currentFileSize = size;
+        this.speedMonitor.currentFileSize = size;
       },
     };
-  }
-
-  /**
-   * Get current speed for display from the actual network monitor
-   */
-  getDisplaySpeed() {
-    if (this.speedMonitor && typeof this.speedMonitor.getCurrentSpeed === 'function') {
-      return this.speedMonitor.getCurrentSpeed().then(speed => speed.total + " MB/s").catch(() => "0.0 MB/s");
-    }
-    if (this.speedTracker && typeof this.speedTracker.getCurrentSpeedMbps === 'function') {
-      return this.speedTracker.getCurrentSpeedMbps() + " Mbps";
-    }
-    return "0.0 Mbps";
-  }
-
-  /**
-   * Get current speed synchronously for display
-   */
-  getCurrentSpeedSync() {
-    if (this.speedTracker && typeof this.speedTracker.getCurrentSpeedMbps === 'function') {
-      return this.speedTracker.getCurrentSpeedMbps() + " Mbps";
-    }
-    return "0.0 Mbps";
   }
 
   /**
@@ -407,7 +377,7 @@ class DownloadChannel {
    */
   async refreshMessageWithStrategies(client, channelId, message, attempt = 1) {
     const maxStrategies = 3;
-
+    
     try {
       if (attempt <= 3) {
         // Strategy 1: Single message refresh
@@ -444,7 +414,7 @@ class DownloadChannel {
           }
         }
       }
-
+      
       return null;
     } catch (error) {
       logger.error(`❌ Strategy ${Math.min(3, Math.ceil(attempt/2))} failed for message ${message.id}: ${error.message}`);
@@ -533,14 +503,14 @@ class DownloadChannel {
    * Ultra-optimized wait function for maximum 35+ Mbps performance
    */
   async ultraOptimizedWait(baseMs) {
-    if (!this.speedTracker || typeof this.speedTracker.getOptimalDelay !== 'function') {
+    if (!this.speedMonitor) {
       await new Promise((resolve) =>
         setTimeout(resolve, Math.max(1, baseMs / 8)),
       );
       return;
     }
 
-    const optimalDelay = this.speedTracker.getOptimalDelay();
+    const optimalDelay = this.speedMonitor.getOptimalDelay();
     const ultraMinimalDelay = Math.min(baseMs / 8, optimalDelay);
 
     // Apply speed boost mode for maximum performance
@@ -555,14 +525,14 @@ class DownloadChannel {
    * Ultra-precision delay with maximum speed optimization
    */
   async precisionDelay(ms) {
-    if (!this.speedTracker || typeof this.speedTracker.getCurrentSpeedMbps !== 'function') {
+    if (!this.speedMonitor || typeof this.speedMonitor.getCurrentSpeedMbps !== 'function') {
       await new Promise((resolve) => setTimeout(resolve, Math.max(5, ms / 3)));
       return;
     }
 
-    const speedFactor = this.speedTracker.stabilizationFactor || 1;
+   const speedFactor = this.speedMonitor.stabilizationFactor || 1;
     const currentSpeedMbps = parseFloat(
-      this.speedTracker.getCurrentSpeedMbps(),
+      this.speedMonitor.getCurrentSpeedMbps(),
     );
 
     let targetDelay;
@@ -738,7 +708,7 @@ class DownloadChannel {
           const deleted = this.deleteExistingFile(mediaPath);
           if (deleted) {
             logger.info(`🔄 Refreshing message ${message.id} after file deletion...`);
-
+            
             // Refresh message after deleting file
             const refreshedMessage = await this.refreshMessageWithStrategies(client, channelId, message, 1);
             if (refreshedMessage) {
@@ -760,7 +730,7 @@ class DownloadChannel {
                          (message.media?.photo?.sizes ? 
                           Math.max(...message.media.photo.sizes.map(s => s.size || 0)) : 0) || 0;
         const adaptiveChunkSize = this.getOptimalChunkSize(fileSize);
-
+        
         // Dynamic optimization with adaptive chunk sizing
         const downloadOptions = isSingleFile
           ? {
@@ -808,24 +778,20 @@ class DownloadChannel {
             logger.warn(
               `⚠️ Size mismatch: ${path.basename(mediaPath)} - Expected: ${(expectedSize / 1024 / 1024).toFixed(2)}MB, Got: ${(fileSize / 1024 / 1024).toFixed(2)}MB`,
             );
-
+            
             // Delete incomplete file and retry
             this.deleteExistingFile(mediaPath);
             throw new Error(`Incomplete download: ${path.basename(mediaPath)}`);
           }
 
-          // Record performance metrics in both systems
-          if (this.speedMonitor && typeof this.speedMonitor.recordTransfer === 'function') {
+          // Record performance metrics
+          if (this.speedMonitor) {
             this.speedMonitor.recordTransfer(speedMbps, fileSize, path.extname(mediaPath), true);
           }
-
-          if (this.speedTracker && typeof this.speedTracker.updateSpeed === 'function') {
-            this.speedTracker.updateSpeed(fileSize);
-          }
-
+          
           // Record successful performance in rate limiter
           this.rateLimiter.recordPerformance(speedMbps, false, fileSize);
-
+          
           this.totalDownloaded++;
           this.resetFileReferenceTracking(); // Reset error tracking on success
 
@@ -838,7 +804,7 @@ class DownloadChannel {
         }
       } catch (error) {
         attempt++;
-
+        
         // Record error in both monitoring systems
         if (error.message.includes("FILE_REFERENCE_EXPIRED")) {
           this.rateLimiter.recordError('FILE_REFERENCE_EXPIRED');
@@ -848,7 +814,7 @@ class DownloadChannel {
         } else {
           this.rateLimiter.recordError('DOWNLOAD_ERROR');
         }
-
+        
         logger.warn(
           `❌ Download attempt ${attempt}/${maxRetries} failed for message ${message.id}: ${error.message}`,
         );
@@ -856,19 +822,19 @@ class DownloadChannel {
         if (error.message.includes("FILE_REFERENCE_EXPIRED")) {
           this.trackFileReferenceError();
           logger.error(`📋 File reference expired for a message, script will retry automatically`);
-
+          
           // Enhanced multi-strategy refresh for FILE_REFERENCE_EXPIRED
           let refreshSuccess = false;
           for (let strategyAttempt = 1; strategyAttempt <= 8; strategyAttempt++) {
             logger.info(`🔄 FILE_REFERENCE strategy attempt ${strategyAttempt}/8 for message ${message.id}`);
-
+            
             const refreshedMessage = await this.refreshMessageWithStrategies(
               client, 
               channelId, 
               originalMessage, 
               strategyAttempt
             );
-
+            
             if (refreshedMessage) {
               message = refreshedMessage;
               logger.success(`✅ FILE_REFERENCE resolved using strategy ${Math.min(3, Math.ceil(strategyAttempt/2))}`);
@@ -876,19 +842,19 @@ class DownloadChannel {
               attempt = Math.max(0, attempt - 3); // Give extra attempts after successful refresh
               break;
             }
-
+            
             // Progressive delay between strategy attempts
             const strategyDelay = Math.min(5000, 1000 * strategyAttempt);
             await this.precisionDelay(strategyDelay);
           }
-
+          
           if (!refreshSuccess) {
             logger.error(`❌ All FILE_REFERENCE strategies failed for message ${message.id}`);
             if (attempt >= maxRetries) {
               throw new Error(`FILE_REFERENCE_EXPIRED: All refresh strategies failed`);
             }
           }
-
+          
           // Continue main loop after refresh attempt
           continue;
         }
@@ -939,8 +905,8 @@ class DownloadChannel {
             const fileSize = fs.statSync(mediaPath).size;
             const speedMbps =
               duration > 0 ? (fileSize * 8) / duration / 1000 / 1000 : 0;
-            if (this.speedTracker && typeof this.speedTracker.updateSpeed === 'function') {
-              this.speedTracker.updateSpeed(fileSize);
+            if (this.speedMonitor) {
+              this.speedMonitor.updateSpeed(fileSize);
             }
             logger.info(
               `📤 Uploaded: Message ${message.id} (${speedMbps.toFixed(1)} Mbps)${isSingleFile ? " [SINGLE-FILE BOOST]" : ""}`,
@@ -1096,8 +1062,9 @@ class DownloadChannel {
 
           if (hasContent) {
             this.totalProcessedMessages++;
-            const currentSpeed = await this.getCurrentSpeedSync();
-            logger.info(`✅ Download complete ${index + 1}/${messages.length}: Message ${message.id} (${currentSpeed})`);
+            logger.info(
+              `✅ Download complete ${index + 1}/${messages.length}: Message ${message.id} (${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps" : "OK"})`,
+            );
             return {
               message: message,
               mediaPath: mediaPath,
@@ -1447,8 +1414,9 @@ class DownloadChannel {
 
           if (hasContent) {
             this.totalProcessedMessages++;
-            const currentSpeed = await this.getCurrentSpeedSync();
-            logger.info(`✅ Download complete ${index + 1}/${messages.length}: Message ${message.id} (${currentSpeed})`);
+            logger.info(
+              `✅ Download complete ${index + 1}/${messages.length}: Message ${message.id} (${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps" : "OK"})`,
+            );
             return {
               message: message,
               mediaPath: mediaPath,
@@ -1608,16 +1576,16 @@ class DownloadChannel {
         `🔄 ULTRA-SPEED batch ${batchIndex + 1}/${totalBatches} (${messages.length} messages) - Speed: ${this.speedMonitor ? this.speedMonitor.getCurrentSpeedMbps() + " Mbps (" + this.speedMonitor.getSpeedStatus() + ")" : "Optimizing..."}`,
       );
 
-      // Enhanced: Refresh messages EVERY batch to prevent file reference errors
+      // Enhanced: Refresh messages EVERY batch to prevent FILE_REFERENCE_EXPIRED errors
       logger.info(
         `🔄 Batch ${this.batchCounter}: Proactively refreshing messages to prevent file reference errors...`,
       );
-
+      
       // Refresh current batch messages specifically
       const currentMessageIds = messages.map((m) => m.id);
       try {
         const refreshedMessages = await getMessageDetail(client, channelId, currentMessageIds);
-
+        
         if (refreshedMessages && refreshedMessages.length > 0) {
           // Update messages with refreshed data
           const messageMap = new Map(refreshedMessages.map(msg => [msg.id, msg]));
@@ -1627,7 +1595,7 @@ class DownloadChannel {
           // Fallback: Full channel refresh if batch refresh fails
           logger.warn(`⚠️ Batch refresh failed, attempting full channel refresh...`);
           const allRefreshedMessages = await this.refreshAllChannelMessages(client, channelId);
-
+          
           if (allRefreshedMessages && allRefreshedMessages.length > 0) {
             const messageMap = new Map(allRefreshedMessages.map(msg => [msg.id, msg]));
             messages = messages.map(msg => messageMap.get(msg.id) || msg);
@@ -1642,7 +1610,7 @@ class DownloadChannel {
       const recentFileRefErrors = this.fileReferenceErrors.filter(
         timestamp => Date.now() - timestamp < 2 * 60 * 1000 // Last 2 minutes
       ).length;
-
+      
       if (this.batchCounter % 3 === 0 || recentFileRefErrors > 5) {
         logger.info(
           `🔄 Extra refresh triggered - Batch ${this.batchCounter} or high error rate (${recentFileRefErrors} recent errors)`,
@@ -1916,7 +1884,7 @@ class DownloadChannel {
       } else {
         // Fallback to original batch processing for single files or when adaptive mode is disabled
         const totalBatches = Math.ceil(messagesToProcess.length / DEFAULT_BATCH_SIZE);
-
+        
         for (let i = 0; i < messagesToProcess.length; i += DEFAULT_BATCH_SIZE) {
           const batch = messagesToProcess.slice(i, i + DEFAULT_BATCH_SIZE);
           const batchIndex = Math.floor(i / DEFAULT_BATCH_SIZE);
@@ -1989,7 +1957,7 @@ class DownloadChannel {
 
     // Check if this is a resume from existing session (user used /do command)
     const isResumeSession = options.resumeSession || false;
-
+    
     if (isResumeSession) {
       logger.info("🔄 Resuming with existing login credentials - Starting from channel selection");
     }
@@ -2171,12 +2139,12 @@ class DownloadChannel {
     try {
       // Initialize speed monitor first
       this.initializeSpeedMonitor();
-
+      
       await this.ultraOptimizedWait(100);
 
       // Check if this is a resume from existing session
       const isResume = process.argv.includes('--resume') || options.resumeSession;
-
+      
       if (isResume) {
         logger.info("🔄 Resuming session - Using existing authentication");
         options.resumeSession = true;
@@ -2224,13 +2192,7 @@ class DownloadChannel {
         this.lastRequestTime = 0;
         this.consecutiveFloodWaits = 0;
         this.consecutiveFileRefErrors = 0; // Reset file reference errors
-
-        // Stop existing monitoring and reinitialize
-        if (this.speedMonitor && typeof this.speedMonitor.stopMonitoring === 'function') {
-          this.speedMonitor.stopMonitoring();
-        }
-        this.speedMonitor = new SpeedMonitor();
-        this.speedTracker = null;
+        this.speedMonitor = null;
 
         const { channelId, messageOffsetId } = await this.configureDownload(
           initialOptions,
