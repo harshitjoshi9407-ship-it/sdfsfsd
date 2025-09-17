@@ -29,21 +29,21 @@ const {
 } = require("../utils/input-helper");
 
 // OPTIMIZED CONFIGURATIONS FOR HIGH-SPEED WITH STABILITY
-const MAX_PARALLEL_DOWNLOADS_CONFIG = 8; // Safe concurrency that prevents flood waits
-const MAX_PARALLEL_UPLOADS_CONFIG = 6; // Conservative uploads to avoid API limits
+const MAX_PARALLEL_DOWNLOADS_CONFIG = 32 ; // Safe concurrency that prevents flood waits
+const MAX_PARALLEL_UPLOADS_CONFIG = 32; // Conservative uploads to avoid API limits
 const MESSAGE_LIMIT_CONFIG = 500; // Reasonable batch size for efficient processing
-const RATE_LIMIT_DELAY_CONFIG = 1000; // Safe 1 second delay, will adapt dynamically
+const RATE_LIMIT_DELAY_CONFIG = 500; // Safe 1 second delay, will adapt dynamically
 const DOWNLOAD_DELAY_CONFIG = 500; // Safe delays that can be reduced dynamically
-const UPLOAD_DELAY_CONFIG = 1500; // More conservative for uploads
+const UPLOAD_DELAY_CONFIG = 500; // More conservative for uploads
 
 // ADAPTIVE CHUNK SIZE - compliant with Telegram API limits
-const SMALL_FILE_CHUNK_SIZE = 1 * 1024 * 1024; // 1MB for files under 100MB - faster startup
-const MEDIUM_FILE_CHUNK_SIZE = 2 * 1024 * 1024; // 2MB for medium files (100-500MB) 
-const LARGE_FILE_CHUNK_SIZE = 4 * 1024 * 1024; // 4MB for larger files - max safe Telegram chunk
+const SMALL_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 1MB for files under 100MB - faster startup
+const MEDIUM_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 2MB for medium files (100-500MB) 
+const LARGE_FILE_CHUNK_SIZE = 32 * 1024 * 1024; // 4MB for larger files - max safe Telegram chunk
 
 // DYNAMIC BATCH PROCESSING - flexible batch sizes based on conditions
 const ADAPTIVE_BATCH_MODE = true; // Enable dynamic batch processing  
-const DEFAULT_BATCH_SIZE = 5; // Increased from 2 for better throughput while maintaining flexibility
+const DEFAULT_BATCH_SIZE = 2; // Increased from 2 for better throughput while maintaining flexibility
 const CONNECTION_POOL_SIZE = 32; // More connection pools for stability
 const SPEED_STABILIZATION_DELAY = 20; // Ultra-minimal stabilization delay
 const THROUGHPUT_OPTIMIZATION_MODE = true;
